@@ -9,9 +9,10 @@
 #include <pthread.h>
 #include <errno.h>
 #include <sys/stat.h>
-
+#include <limits.h>
 #define MAXLINE  2048
 #define BACKLOG  5
+#define CHUNK_BUFSIZE 4096
 
 // filled from config files on startup
 int  tracker_port    = 3490;
@@ -216,47 +217,248 @@ void *update_thread_func(void *arg) {
 }
 
 
-// background thread that listens for other peers wanting to download from us
-// not fully implemented yet - needed for the final demo chunk transfer
+
+//send all bytes in buffer over socket (handles partial writes)
+static int send_all(int sock, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    size_t sent = 0;
+
+    //loop until all bytes are sent
+    while (sent < len) {
+        ssize_t n = write(sock, p + sent, len - sent);
+
+        //retry if interrupted
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1; //real error
+        }
+
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+//read a single line from socket until newline
+static int recv_line(int sock, char *buf, size_t size) {
+    size_t i = 0;
+
+    if (size == 0) return -1;
+
+    while (i < size - 1) {
+        char c;
+        ssize_t n = read(sock, &c, 1);
+
+        //try again if interrupted
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+
+        if (n == 0) break;   // connection closed
+
+        buf[i++] = c;
+        
+        if (c == '\n') break; // stop at newline
+    }
+
+    buf[i] = '\0'; // null terminate
+    return (int)i;
+}
+
+//ensure filename is safe (no directory traversal)
+static int filename_is_safe(const char *name) {
+    if (!name || !*name) return 0;
+
+    // block ../ or absolute paths
+    if (strstr(name, "..")) return 0;
+    if (strchr(name, '/')) return 0;
+    if (strchr(name, '\\')) return 0;
+
+    return 1;
+}
+
+// send standardized error message to peer
+static int send_error_msg(int sock, const char *msg) {
+    char line[256];
+    snprintf(line, sizeof(line), "ERR %s\n", msg);
+    return send_all(sock, line, strlen(line));
+}
+
+//core logic: send requested byte range from file
+static int handle_getchunk_request(int conn, const char *filename, long start_b, long end_b) {
+    char filepath[512];
+    FILE *fp = NULL;
+    long filesize;
+    long bytes_to_send;
+    char buffer[CHUNK_BUFSIZE];
+
+    //validate filename for security
+    if (!filename_is_safe(filename)) {
+        return send_error_msg(conn, "invalid filename");
+    }
+
+    //build full file path inside shared directory
+    snprintf(filepath, sizeof(filepath), "%s%s", shared_dir, filename);
+
+    //open file for reading (binary mode)
+    fp = fopen(filepath, "rb");
+    if (!fp) {
+        return send_error_msg(conn, "file not found");
+    }
+
+    //get file size
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return send_error_msg(conn, "fseek failed");
+    }
+
+    filesize = ftell(fp);
+    if (filesize < 0) {
+        fclose(fp);
+        return send_error_msg(conn, "ftell failed");
+    }
+
+    // validate requested byte range
+    if (start_b < 0 || end_b < start_b || start_b >= filesize) {
+        fclose(fp);
+        return send_error_msg(conn, "invalid byte range");
+    }
+
+    //clamp end byte if it exceeds file size
+    if (end_b >= filesize) {
+        end_b = filesize - 1;
+    }
+
+    //total bytes to send
+    bytes_to_send = end_b - start_b + 1;
+
+    // move file pointer to start byte
+    if (fseek(fp, start_b, SEEK_SET) != 0) {
+        fclose(fp);
+        return send_error_msg(conn, "could not seek to start byte");
+    }
+
+    //send response header first
+    {
+        char header[128];
+        snprintf(header, sizeof(header), "OK %ld %ld\n", start_b, end_b);
+
+        if (send_all(conn, header, strlen(header)) < 0) {
+            fclose(fp);
+            return -1;
+        }
+    }
+
+    // send file data in chunks
+    while (bytes_to_send > 0) {
+        size_t want = (bytes_to_send > CHUNK_BUFSIZE) ? CHUNK_BUFSIZE : (size_t)bytes_to_send;
+
+        size_t got = fread(buffer, 1, want, fp);
+
+        //check for read error
+        if (got == 0) {
+            if (ferror(fp)) {
+                fclose(fp);
+                return -1;
+            }
+            break;
+        }
+
+        //send chunk to peer
+        if (send_all(conn, buffer, got) < 0) {
+            fclose(fp);
+            return -1;
+        }
+
+        bytes_to_send -= (long)got;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+// background thread: listens for incoming peer connections
 void *server_thread_func(void *arg) {
     (void)arg;
 
+    //create TCP socke
     int listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener < 0) { perror("peer server socket"); return NULL; }
+    if (listener < 0) {
+        perror("peer server socket");
+        return NULL;
+    }
 
+    //allow reuse of address (avoids bind errors)
     int yes = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
+    //setup address structure
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(my_listen_port);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(my_listen_port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
+    //bind socket to port
     if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("peer server bind"); close(listener); return NULL;
+        perror("peer server bind");
+        close(listener);
+        return NULL;
     }
+
+    //start listening for connections
     if (listen(listener, BACKLOG) < 0) {
-        perror("peer server listen"); close(listener); return NULL;
+        perror("peer server listen");
+        close(listener);
+        return NULL;
     }
 
     printf("listening for peers on port %d\n", my_listen_port);
 
+    //main accept loop
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t clen = sizeof(client_addr);
+
+        //accept incoming connection
         int conn = accept(listener, (struct sockaddr *)&client_addr, &clen);
-        if (conn < 0) { perror("accept"); continue; }
+        if (conn < 0) {
+            perror("accept");
+            continue;
+        }
 
         printf("peer connected from %s\n", inet_ntoa(client_addr.sin_addr));
 
-        // for now just acknowledge - final demo will send actual file chunks here
-        write(conn, "peer server ready\n", 18);
-        close(conn);
+        //read request line
+        char req[MAXLINE];
+        int n = recv_line(conn, req, sizeof(req));
+        if (n <= 0) {
+            close(conn);
+            continue;
+        }
+
+        printf("peer request: %s", req);
+
+        //parse request
+        char cmd[64];
+        char filename[256];
+        long start_b, end_b;
+
+        int parsed = sscanf(req, "%63s %255s %ld %ld", cmd, filename, &start_b, &end_b);
+
+        //handle "GETCHUNK request
+        if (parsed == 4 && strcmp(cmd, "GETCHUNK") == 0) {
+            if (handle_getchunk_request(conn, filename, start_b, end_b) < 0) {
+                perror("handle_getchunk_request");
+            }
+        } else {
+            //invalid request format
+            send_error_msg(conn, "expected: GETCHUNK <filename> <start> <end>");
+        }
+        close(conn); 
     }
     return NULL;
 }
-
 
 int main(int argc, char *argv[]) {
     read_client_config();
