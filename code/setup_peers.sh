@@ -1,31 +1,41 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# 1. Compile the code first so we have a fresh executable
-make peer
+echo "--- Starting P2P Environment Setup ---"
+
+# 1. Compile the code
+make clean
+if ! make peer; then
+    echo "ERROR: Compilation failed. Please check your C code or Makefile."
+    exit 1
+fi
 
 # 2. Loop to create 13 peers
-for i in {1..13}
-do
-    # Create the peer folder and its specific shared folder
+for i in {1..13}; do
     FOLDER="peer$i"
-    mkdir -p $FOLDER/shared$i
     
-    # Copy the compiled peer program into the folder
-    cp peer $FOLDER/
+    # Create the peer folder and specific shared folder
+    mkdir -p "$FOLDER/shared$i"
     
-    # --- Create UNIQUE serverThreadConfig.cfg ---
-    # We start at port 4000 and add $i (Peer 1 = 4001, Peer 2 = 4002, etc.)
+    # Copy compiled peer program into folder
+    if [ -f "peer" ]; then
+        cp peer "$FOLDER/"
+    fi
+    
+    # Create unique serverThreadConfig.cfg for each
     PORT=$((4000 + i))
-    echo "$PORT" > $FOLDER/serverThreadConfig.cfg
-    echo "shared$i/" >> $FOLDER/serverThreadConfig.cfg
+    {
+        echo "$PORT"
+        echo "shared$i/"
+    } > "$FOLDER/serverThreadConfig.cfg"
     
-    # --- Create STANDARD clientThreadConfig.cfg ---
-    # Everyone talks to the same tracker (Port 3490, localhost, 900s interval)
-    echo "3490" > $FOLDER/clientThreadConfig.cfg
-    echo "127.0.0.1" >> $FOLDER/clientThreadConfig.cfg
-    echo "900" >> $FOLDER/clientThreadConfig.cfg
+    # Create one clientThreadConfig.cfg for all
+    {
+        echo "3490"
+        echo "127.0.0.1"
+        echo "900"
+    } > "$FOLDER/clientThreadConfig.cfg"
 
     echo "Created $FOLDER with Port $PORT"
 done
 
-echo "All 12 peer folders are ready!"
+echo "All 13 peer folders are built, configured, and ready."

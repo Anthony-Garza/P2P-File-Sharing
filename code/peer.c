@@ -482,12 +482,12 @@ void *server_thread_func(void *arg) {
 // THE MULTI-THREADED DOWNLOADER & MD5 VERIFIER
 // =========================================================
 
-// function so the TA's computer doesn't crash if they aren't on a Mac
+// checks mac or linux
 void get_cross_platform_md5(const char *filepath, char *result_hash) {
     FILE *pipe;
     char cmd[512];
     
-    // First try the standard Mac command built this on Macs
+    // mac command
     sprintf(cmd, "md5 -q %s 2>/dev/null", filepath);
     pipe = popen(cmd, "r");
     if (pipe != NULL && fscanf(pipe, "%63s", result_hash) == 1) {
@@ -496,7 +496,7 @@ void get_cross_platform_md5(const char *filepath, char *result_hash) {
     }
     if (pipe) pclose(pipe);
 
-    // If that failed probably on Linux or WSL, so try md5sum instead
+    // if mac fails then linux
     sprintf(cmd, "md5sum %s 2>/dev/null", filepath);
     pipe = popen(cmd, "r");
     if (pipe != NULL && fscanf(pipe, "%63s", result_hash) == 1) {
@@ -505,11 +505,11 @@ void get_cross_platform_md5(const char *filepath, char *result_hash) {
     }
     if (pipe) pclose(pipe);
 
-    // If all else fails return an error string
+    // If all fails return an error
     strcpy(result_hash, "ERROR_CALCULATING_MD5");
 }
 
-// The "Worker" thread its only job is to grab one specific 1024-byte piece of the file
+// worker thread: only job = grab one specific 1024 byte piece of file
 void *download_chunk_thread(void *arg) {
     struct ChunkTask *task = (struct ChunkTask *)arg;
     
@@ -530,7 +530,7 @@ void *download_chunk_thread(void *arg) {
     write(sock, request, strlen(request));
 
     char buffer[2048];
-    // SAFETY: Leave room for null terminator so strchr doesn't crash
+    // leave room for null terminator so strchr doesn't crash
     int bytes_read = read(sock, buffer, sizeof(buffer) - 1);
     
     if (bytes_read <= 0) {
@@ -540,7 +540,7 @@ void *download_chunk_thread(void *arg) {
         return NULL;
     }
     
-    buffer[bytes_read] = '\0'; // Make it a safe string
+    buffer[bytes_read] = '\0';
     
     char *data_start = strchr(buffer, '\n');
     if (data_start != NULL) {
@@ -574,14 +574,14 @@ void *download_chunk_thread(void *arg) {
     printf("Peer%d downloading %ld to %ld bytes of %s from %s %d\n",
            my_peer_num, task->start_byte, task->end_byte, task->filename, task->peer_ip, task->peer_port);
            
-    usleep(25000); // 25ms artificial network lag per rubric
+    usleep(25000); // 25ms artificial network lag
            
     close(sock);
     free(task);
     return NULL;
 }
 
-// The "Boss" function: reads the .track file and sends out the worker threads
+// reads .track file and creates worker threads
 void start_multithreaded_download(char *trackfile_name) {
     char filepath[512];
     sprintf(filepath, "%s%s", shared_dir, trackfile_name);
@@ -595,7 +595,7 @@ void start_multithreaded_download(char *trackfile_name) {
     char peer_ip[64] = "";
     int peer_port = 0;
 
-    // Dig through the file to find the filename, size, MD5, and the peer's IP/Port
+    // look through the file to find the filename, size, MD5, and the peer IP/Port
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "Filename:")) sscanf(line, "Filename: %s", real_filename);
@@ -607,11 +607,11 @@ void start_multithreaded_download(char *trackfile_name) {
     }
     fclose(fp);
 
-    // Figure out exactly how many threads we need if everyone only takes 1024 bytes
+    // find out how many threads required
     int num_chunks = (filesize + 1023) / 1024;
     pthread_t threads[num_chunks];
 
-    // Spawn a thread for every single chunk
+    // Spawns thread for every single chunk
     for (int i = 0; i < num_chunks; i++) {
         struct ChunkTask *task = malloc(sizeof(struct ChunkTask));
         strcpy(task->filename, real_filename);
@@ -621,7 +621,7 @@ void start_multithreaded_download(char *trackfile_name) {
         task->start_byte = i * 1024;
         task->end_byte = task->start_byte + 1023;
         
-        // Dont let the last chunk accidentally ask for more file than actually exists
+        // ensure last chunk doesnt ask for more file than exists
         if (task->end_byte >= filesize) task->end_byte = filesize - 1;
 
         pthread_create(&threads[i], NULL, download_chunk_thread, task);
@@ -633,7 +633,7 @@ void start_multithreaded_download(char *trackfile_name) {
         pthread_join(threads[i], NULL);
     }
 
-    // Did we get corrupted data check
+    // corrupted data check
     char downloaded_filepath[512];
     sprintf(downloaded_filepath, "%s%s", shared_dir, real_filename);
 
@@ -642,7 +642,7 @@ void start_multithreaded_download(char *trackfile_name) {
 
     if (strcmp(computed_md5, expected_md5) == 0) {
         printf("Success! MD5 Matched (%s).\n", computed_md5);
-        remove(filepath); // delete this file when we hit 100%
+        remove(filepath); // delete  file when we hit 100%
     } else {
         printf("ERROR: MD5 Mismatch!\nExpected: %s\nGot:      %s\n", expected_md5, computed_md5);
     }
@@ -652,7 +652,7 @@ int main(int argc, char *argv[]) {
     read_client_config();
     read_server_config();
 
-    // kick off background threads
+    // background threads
     pthread_t update_tid, server_tid;
     pthread_create(&update_tid, NULL, update_thread_func, NULL);
     pthread_detach(update_tid);
@@ -694,7 +694,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    // If this peer just created a tracker, it needs to stay alive forever to serve the files!
+    // If  peer just created a tracker, it needs to stay alive forever to serve the files
     if (argc > 1 && strcmp(argv[1], "createtracker") == 0) {
         printf("Seed mode active. Keeping server thread alive...\n");
         while (1) {
