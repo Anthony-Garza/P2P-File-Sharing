@@ -32,7 +32,7 @@ for i in {1..13}; do
     {
         echo "3490"
         echo "127.0.0.1"
-        echo "900"
+        echo "10"
     } > "$FOLDER/clientThreadConfig.cfg"
 
     echo "Created $FOLDER with Port $PORT"

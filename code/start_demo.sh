@@ -50,15 +50,17 @@ for i in {3..8}; do
     echo "Peer$i: List"
     echo "Peer$i: Get movie1.track"
     echo "Peer$i: Get movie2.track"
-    (cd "peer$i" && ./peer list && ./peer get movie1.track && ./peer get movie2.track) &
+    (cd "peer$i" && ./peer list && ./peer get movie1.track movie2.track) &
 done
 
 sleep 60
 
 # TERMINATE SEEDS
 echo "Time 1m 30s: Terminating Seeds..."
-pkill -f "peer1/peer"
-pkill -f "peer2/peer"
+pkill -9 -f "peer1/peer"
+pkill -9 -f "peer2/peer"
+lsof -ti:4001 | xargs kill -9 2>/dev/null
+lsof -ti:4002 | xargs kill -9 2>/dev/null
 echo "Peer1 terminated"
 echo "Peer2 terminated"
 
@@ -68,7 +70,9 @@ for i in {9..13}; do
     echo "Peer$i: List"
     echo "Peer$i: Get movie1.track"
     echo "Peer$i: Get movie2.track"
-    (cd "peer$i" && ./peer list && ./peer get movie1.track && ./peer get movie2.track) &
+    (cd "peer$i" && ./peer list && ./peer get movie1.track movie2.track) &
 done
 
-echo "Demo script complete. Watch terminal for the final P2P chunk transfers."
+echo "keeping network alive till all peers finish."
+
+wait
